@@ -249,86 +249,115 @@ export default function App() {
     setIsProcessing(true);
     setStatus({ message: "AI is processing your photo...", type: 'info' });
 
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Gemini API Key is missing. Please check your environment variables.");
-      }
-      const ai = new GoogleGenAI({ apiKey });
+    const maxRetries = 2;
+    let retryCount = 0;
 
-      // Convert original image to base64 with resizing
-      const maxDim = 1024;
-      let width = originalImage.width;
-      let height = originalImage.height;
-      
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
+    const executeAI = async (): Promise<void> => {
+      try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          throw new Error("Gemini API Key is missing. Please check your environment variables.");
         }
-      }
+        const ai = new GoogleGenAI({ apiKey });
 
-      const tempCanvas = document.createElement('canvas');
-      const tempCtx = tempCanvas.getContext('2d');
-      if (!tempCtx) throw new Error("Could not create canvas context");
-      
-      tempCanvas.width = width;
-      tempCanvas.height = height;
-      tempCtx.drawImage(originalImage, 0, 0, width, height);
-      const base64Data = tempCanvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-
-      const prompt = `Edit this photo for a professional ID. 
-      1. Change the person's attire to ${attire}. 
-      2. Change the background to a solid ${bgColor} color. 
-      3. Keep the person's face and features exactly as they are. 
-      4. Ensure the lighting is professional and the result looks like a high-quality studio photo.`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-image",
-        contents: {
-          parts: [
-            { inlineData: { data: base64Data, mimeType: "image/jpeg" } },
-            { text: prompt }
-          ]
-        }
-      });
-
-      const parts = response.candidates?.[0]?.content?.parts;
-      let modifiedBase64 = null;
-
-      if (parts) {
-        for (const part of parts) {
-          if (part.inlineData) {
-            modifiedBase64 = part.inlineData.data;
-            break;
+        // Convert original image to base64 with resizing
+        const maxDim = 1024;
+        let width = originalImage.width;
+        let height = originalImage.height;
+        
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
           }
         }
-      }
 
-      if (modifiedBase64) {
-        const img = new Image();
-        img.onload = () => {
-          setCurrentDisplayImage(img);
-          setThumbnailUrl(`data:image/jpeg;base64,${modifiedBase64}`);
-          setIsProcessing(false);
-          setStatus({ message: "AI enhancement applied successfully!", type: 'success' });
-        };
-        img.src = `data:image/jpeg;base64,${modifiedBase64}`;
-      } else {
-        throw new Error("AI did not return an image. Please try again.");
-      }
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        if (!tempCtx) throw new Error("Could not create canvas context");
+        
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        tempCtx.drawImage(originalImage, 0, 0, width, height);
+        const base64Data = tempCanvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 
-    } catch (err: any) {
-      console.error("AI Error:", err);
-      setStatus({ 
-        message: err?.message || 'AI processing failed. Please check your API key or try again.', 
-        type: 'error' 
-      });
-      setIsProcessing(false);
-    }
+        const prompt = `Edit this photo for a professional ID. 
+        1. Change the person's attire to ${attire}. 
+        2. Change the background to a solid ${bgColor} color. 
+        3. Keep the person's face and features exactly as they are. 
+        4. Ensure the lighting is professional and the result looks like a high-quality studio photo.`;
+
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash-image",
+          contents: {
+            parts: [
+              { inlineData: { data: base64Data, mimeType: "image/jpeg" } },
+              { text: prompt }
+            ]
+          }
+        });
+
+        const parts = response.candidates?.[0]?.content?.parts;
+        let modifiedBase64 = null;
+
+        if (parts) {
+          for (const part of parts) {
+            if (part.inlineData) {
+              modifiedBase64 = part.inlineData.data;
+              break;
+            }
+          }
+        }
+
+        if (modifiedBase64) {
+          const img = new Image();
+          img.onload = () => {
+            setCurrentDisplayImage(img);
+            setThumbnailUrl(`data:image/jpeg;base64,${modifiedBase64}`);
+            setIsProcessing(false);
+            setStatus({ message: "AI enhancement applied successfully!", type: 'success' });
+          };
+          img.src = `data:image/jpeg;base64,${modifiedBase64}`;
+        } else {
+          throw new Error("AI did not return an image. Please try again.");
+        }
+
+      } catch (err: any) {
+        const errorMsg = err?.message || '';
+        const isQuotaError = errorMsg.toLowerCase().includes('quota') || 
+                             errorMsg.toLowerCase().includes('rate limit') || 
+                             errorMsg.includes('429');
+
+        if (isQuotaError && retryCount < maxRetries) {
+          retryCount++;
+          const delay = retryCount * 2000; // 2s, 4s
+          setStatus({ 
+            message: `Quota reached. Retrying in ${delay/1000}s... (Attempt ${retryCount}/${maxRetries})`, 
+            type: 'info' 
+          });
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return executeAI();
+        }
+
+        console.error("AI Error:", err);
+        let finalMessage = err?.message || 'AI processing failed.';
+        
+        if (isQuotaError) {
+          finalMessage = "Gemini API Quota Exceeded. The free tier has limits (e.g., 15 requests per minute). Please wait a minute or upgrade your plan at ai.google.dev.";
+        }
+        
+        setStatus({ 
+          message: finalMessage, 
+          type: 'error' 
+        });
+        setIsProcessing(false);
+      }
+    };
+
+    await executeAI();
   };
 
   const downloadPNG = () => {
